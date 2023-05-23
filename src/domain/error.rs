@@ -8,6 +8,8 @@ pub enum DomainError {
     #[error("ID {0} not found.")]
     NotFound(String),
     #[error(transparent)]
+    InfrastructureError(anyhow::Error),
+    #[error(transparent)]
     Other(anyhow::Error),
 }
 

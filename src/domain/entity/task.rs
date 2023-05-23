@@ -65,6 +65,7 @@ impl TaskStatus {
     }
 }
 
+#[derive(PartialEq, Eq, Debug, Clone)]
 pub struct Task {
     pub id: TaskId,
     pub body: TaskBody,

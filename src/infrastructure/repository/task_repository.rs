@@ -1,7 +1,7 @@
-use async_trait::async_trait;
 use crate::domain::entity::task::{Task, TaskBody, TaskId, TaskStatus};
 use crate::domain::error::DomainError;
 use crate::domain::repository::task_repository::TaskRepository;
+use async_trait::async_trait;
 use sqlx::{FromRow, PgConnection, PgPool};
 
 #[derive(FromRow)]
@@ -38,7 +38,11 @@ impl TaskRepository for PgTaskRepository {
     }
 
     async fn update(&self, task: &Task) -> Result<(), DomainError> {
-        todo!()
+        let mut tx = self.pool.begin().await?;
+        InternalTaskRepository::update(task, &mut tx).await?;
+        tx.commit().await?;
+
+        Ok(())
     }
 
     async fn delete(&self, id: &TaskId) -> Result<bool, DomainError> {
@@ -49,10 +53,7 @@ impl TaskRepository for PgTaskRepository {
 pub struct InternalTaskRepository {}
 
 impl InternalTaskRepository {
-    pub async fn create(
-        task: &Task,
-        conn: &mut PgConnection,
-    ) -> Result<(), DomainError> {
+    pub async fn create(task: &Task, conn: &mut PgConnection) -> Result<(), DomainError> {
         sqlx::query("INSERT INTO task (id, body, status) VALUES ($1, $2, $3)")
             .bind(task.id.as_str())
             .bind(task.body.as_str())
@@ -74,7 +75,19 @@ impl InternalTaskRepository {
             let body = TaskBody::new(row.body)?;
             let status = TaskStatus::new(row.status)?;
             Ok(Task::new(id, body, status))
-        }).transpose()
+        })
+        .transpose()
+    }
+
+    async fn update(task: &Task, conn: &mut PgConnection) -> Result<(), DomainError> {
+        sqlx::query("UPDATE task SET body = $1, status = $2 WHERE id = $3")
+            .bind(task.body.as_str())
+            .bind(task.status.as_str())
+            .bind(task.id.as_str())
+            .execute(&mut *conn)
+            .await?;
+
+        Ok(())
     }
 }
 
@@ -82,36 +95,56 @@ impl InternalTaskRepository {
 mod tests {
     use super::*;
     use sqlx::postgres::PgPoolOptions;
+    use sqlx::{Postgres, Transaction};
     use std::env::VarError;
 
     #[tokio::test]
     async fn test_create_and_find_by_id() -> anyhow::Result<()> {
-        dotenv::dotenv().ok();
+        let mut tx = get_transaction().await?;
 
-        let database_url = fetch_database_url();
-        let pool = PgPoolOptions::new()
-            .max_connections(5)
-            .connect(&database_url)
-            .await?;
+        let task = build_base_task().await?;
 
-        let mut tx = pool.begin().await?;
-
-        let task_id = TaskId::new(String::from("task 1"))?;
-        let task_body = TaskBody::new(String::from("description"))?;
-        let task_status = TaskStatus::new(String::from("05"))?;
-        let task = Task::new(task_id.clone(), task_body, task_status);
-
-        let fetched_task = InternalTaskRepository::find_by_id(&task_id, &mut tx).await?;
+        let fetched_task = InternalTaskRepository::find_by_id(&task.id, &mut tx).await?;
         assert!(fetched_task.is_none());
 
         // create
         InternalTaskRepository::create(&task, &mut tx).await?;
 
-        let fetched_task = InternalTaskRepository::find_by_id(&task_id, &mut tx).await?;
+        let fetched_task = InternalTaskRepository::find_by_id(&task.id, &mut tx).await?;
         assert_eq!(fetched_task, Some(task));
 
         tx.rollback();
         Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_update_and_find_by_id() -> anyhow::Result<()> {
+        let mut tx = get_transaction().await?;
+        let task = build_base_task().await?;
+        InternalTaskRepository::create(&task, &mut tx).await?;
+
+        let new_body = TaskBody::new(String::from("new body"))?;
+        let new_task = Task::new(
+            task.id.clone(),
+            TaskBody::new(String::from("new body"))?,
+            TaskStatus::new(String::from("02"))?,
+        );
+
+        InternalTaskRepository::update(&new_task, &mut tx).await?;
+
+        let fetched_task = InternalTaskRepository::find_by_id(&task.id, &mut tx).await?;
+        assert_eq!(fetched_task, Some(new_task));
+
+        tx.rollback();
+        Ok(())
+    }
+
+    async fn build_base_task() -> Result<Task, DomainError> {
+        let task_id = TaskId::new(String::from("task 1"))?;
+        let task_body = TaskBody::new(String::from("description"))?;
+        let task_status = TaskStatus::new(String::from("05"))?;
+        let task = Task::new(task_id.clone(), task_body, task_status);
+        Ok(task)
     }
 
     fn fetch_database_url() -> String {
@@ -122,5 +155,17 @@ mod tests {
                 panic!("Environment variable DATABASE_URL is not unicode.")
             }
         }
+    }
+
+    async fn get_transaction() -> Result<Transaction<'static, Postgres>, DomainError> {
+        dotenv::dotenv().ok();
+
+        let database_url = fetch_database_url();
+        let pool = PgPoolOptions::new()
+            .max_connections(5)
+            .connect(&database_url)
+            .await?;
+
+        Ok(pool.begin().await?)
     }
 }

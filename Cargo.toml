@@ -14,3 +14,4 @@ sqlx = { version = "0.6.3", features = ["runtime-tokio-rustls", "postgres"] }
 thiserror = "1.0.40"
 tokio = { version = "1.28.1", features = ["full"] }
 validator = { version = "0.16.0", features = ["derive"] }
+futures-util = "0.3.28"

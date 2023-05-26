@@ -2,6 +2,7 @@ use crate::domain::entity::task::{Task, TaskBody, TaskId, TaskStatus};
 use crate::domain::error::DomainError;
 use crate::domain::repository::task_repository::TaskRepository;
 use async_trait::async_trait;
+use futures_util::{StreamExt, TryStreamExt};
 use sqlx::{FromRow, PgConnection, PgPool};
 
 #[derive(FromRow)]
@@ -27,6 +28,11 @@ impl TaskRepository for PgTaskRepository {
     async fn find_by_id(&self, id: &TaskId) -> Result<Option<Task>, DomainError> {
         let mut conn = self.pool.acquire().await?;
         InternalTaskRepository::find_by_id(id, &mut conn).await
+    }
+
+    async fn find_all(&self) -> Result<Vec<Task>, DomainError> {
+        let mut conn = self.pool.acquire().await?;
+        InternalTaskRepository::find_all(&mut conn).await
     }
 
     async fn create(&self, task: &Task) -> Result<(), DomainError> {
@@ -62,6 +68,26 @@ impl InternalTaskRepository {
             .await?;
 
         Ok(())
+    }
+
+    async fn find_all(conn: &mut PgConnection) -> Result<Vec<Task>, DomainError> {
+        let tasks = sqlx::query_as("SELECT * FROM task ORDER BY 1")
+            .fetch(conn)
+            .map(
+                |row: Result<TaskRow, sqlx::Error>| -> Result<Task, DomainError> {
+                    let row = row?;
+                    let id = TaskId::new(row.id)?;
+                    let body = TaskBody::new(row.body)?;
+                    let status = TaskStatus::new(row.status)?;
+
+                    let task = Task::new(id, body, status);
+                    Ok(task)
+                },
+            )
+            .try_collect()
+            .await;
+
+        tasks
     }
 
     async fn find_by_id(id: &TaskId, conn: &mut PgConnection) -> Result<Option<Task>, DomainError> {
@@ -113,7 +139,7 @@ mod tests {
         let fetched_task = InternalTaskRepository::find_by_id(&task.id, &mut tx).await?;
         assert_eq!(fetched_task, Some(task));
 
-        tx.rollback();
+        tx.rollback().await?;
         Ok(())
     }
 
@@ -135,7 +161,21 @@ mod tests {
         let fetched_task = InternalTaskRepository::find_by_id(&task.id, &mut tx).await?;
         assert_eq!(fetched_task, Some(new_task));
 
-        tx.rollback();
+        tx.rollback().await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_find_all() -> anyhow::Result<()> {
+        let mut tx = get_transaction().await?;
+        let task = build_base_task().await?;
+        InternalTaskRepository::create(&task, &mut tx).await?;
+
+        let fetched_task = InternalTaskRepository::find_all(&mut tx).await?;
+        assert_eq!(fetched_task.len(), 1);
+
+        tx.rollback().await?;
+
         Ok(())
     }
 
